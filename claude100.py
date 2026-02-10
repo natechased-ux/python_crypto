@@ -13,49 +13,33 @@ class CoinbaseScanner:
         self.base_url = "https://api.exchange.coinbase.com"
         
     def get_trading_pairs(self):
-        """Get all USD trading pairs sorted by 24h volume in USD"""
-        try:
-            response = requests.get(f"{self.base_url}/products")
-            products = response.json()
-            
-            # Filter for USD pairs that are actively trading
-            usd_products = [
-                p for p in products 
-                if p['quote_currency'] == 'USD' 
-                and p['status'] == 'online'
-                and not p['trading_disabled']
-            ]
-            
-            # Get 24h stats for volume sorting
-            pairs_with_volume = []
-            for product in usd_products:
-                try:
-                    stats_response = requests.get(f"{self.base_url}/products/{product['id']}/stats")
-                    if stats_response.status_code == 200:
-                        stats = stats_response.json()
-                        # Calculate volume in USD (volume * last price)
-                        volume_tokens = float(stats.get('volume', 0))
-                        last_price = float(stats.get('last', 0))
-                        volume_usd = volume_tokens * last_price
-                        
-                        if volume_usd > 0:  # Only include pairs with actual volume
-                            pairs_with_volume.append((product['id'], volume_usd))
-                    time.sleep(0.35)  # Rate limiting
-                except Exception as e:
-                    continue
-            
-            # Sort by USD volume (highest first)
-            pairs_with_volume.sort(key=lambda x: x[1], reverse=True)
-            sorted_pairs = [pair for pair, volume in pairs_with_volume]
-            
-            print(f"Found {len(sorted_pairs)} active USD pairs")
-            if sorted_pairs:
-                print(f"Highest volume: {pairs_with_volume[0][0]} (${pairs_with_volume[0][1]:,.0f} USD)")
-            
-            return sorted_pairs
-        except Exception as e:
-            print(f"Error fetching trading pairs: {e}")
-            return []
+        """Get top 100 most liquid USD trading pairs (hardcoded)"""
+        # Top 100 most liquid pairs on Coinbase by typical volume
+        top_pairs = [
+            'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'DOGE-USD',
+            'ADA-USD', 'AVAX-USD', 'DOT-USD', 'MATIC-USD', 'LINK-USD',
+            'UNI-USD', 'ATOM-USD', 'LTC-USD', 'ETC-USD', 'XLM-USD',
+            'ALGO-USD', 'BCH-USD', 'NEAR-USD', 'APT-USD', 'ARB-USD',
+            'OP-USD', 'FIL-USD', 'ICP-USD', 'VET-USD', 'HBAR-USD',
+            'QNT-USD', 'AAVE-USD', 'MKR-USD', 'GRT-USD', 'SAND-USD',
+            'MANA-USD', 'AXS-USD', 'EGLD-USD', 'XTZ-USD', 'THETA-USD',
+            'FTM-USD', 'EOS-USD', 'KLAY-USD', 'CHZ-USD', 'ENJ-USD',
+            'ZEC-USD', 'BAT-USD', 'COMP-USD', 'SNX-USD', 'YFI-USD',
+            'SUSHI-USD', 'CRV-USD', 'ZRX-USD', '1INCH-USD', 'BAL-USD',
+            'REN-USD', 'UMA-USD', 'LRC-USD', 'OMG-USD', 'KNC-USD',
+            'BNT-USD', 'STORJ-USD', 'SKL-USD', 'ANKR-USD', 'NKN-USD',
+            'OGN-USD', 'BAND-USD', 'NMR-USD', 'RLC-USD', 'MLN-USD',
+            'FORTH-USD', 'AMP-USD', 'SHIB-USD', 'JASMY-USD', 'GALA-USD',
+            'IMX-USD', 'ENS-USD', 'LPT-USD', 'MASK-USD', 'ACH-USD',
+            'IOTX-USD', 'SPELL-USD', 'CTX-USD', 'APE-USD', 'GMT-USD',
+            'GST-USD', 'GAL-USD', 'LDO-USD', 'BLUR-USD', 'PEPE-USD',
+            'SUI-USD', 'SEI-USD', 'TIA-USD', 'PYTH-USD', 'WLD-USD',
+            'ORDI-USD', 'BONK-USD', 'STRK-USD', 'WIF-USD', 'FLOKI-USD',
+            'INJ-USD', 'RNDR-USD', 'FET-USD', 'AGIX-USD', 'OCEAN-USD'
+        ]
+        
+        print(f"Using hardcoded list of {len(top_pairs)} most liquid pairs")
+        return top_pairs
     
     def get_candles(self, pair, granularity=3600):
         """
@@ -123,11 +107,7 @@ class CoinbaseScanner:
         # MACD
         df['macd'], df['macd_signal'] = self.calculate_macd(df['close'])
         
-        # Relative Volume (current volume vs average volume)
-        df['volume_avg_30'] = df['volume'].rolling(window=30).mean()
-        df['relative_volume'] = df['volume'] / df['volume_avg_30']
-        
-        # Volume trend (short-term)
+        # Volume trend
         df['volume_sma'] = df['volume'].rolling(window=20).mean()
         df['volume_trend'] = (df['volume'] / df['volume_sma']) - 1
         
@@ -177,25 +157,15 @@ class CoinbaseScanner:
         elif latest['price_change_pct'] < -5:
             score -= 1
         
-        # Relative Volume confirmation (high relative volume confirms trend)
-        if latest['relative_volume'] > 1.5:
-            # High relative volume - strengthen current trend
-            if score > 0:
-                score += 1.5  # Confirms bullish trend
-            elif score < 0:
-                score -= 1.5  # Confirms bearish trend
-        elif latest['relative_volume'] > 1.2:
-            if score > 0:
-                score += 0.5
-            elif score < 0:
-                score -= 0.5
+        # Volume confirmation
+        if latest['volume_trend'] > 0.3:
+            score += 1  # High volume confirms trend
         
         return {
             'score': score,
             'price': latest['close'],
             'rsi': latest['rsi'],
             'price_change_24h': latest['price_change_pct'],
-            'relative_volume': latest['relative_volume'],
             'volume_trend': latest['volume_trend']
         }
     
@@ -251,7 +221,7 @@ def main():
     scanner = CoinbaseScanner()
     
     # Scan market (limit to 20 pairs for faster execution, remove limit for full scan)
-    results = scanner.scan_market(limit=20)
+    results = scanner.scan_market(limit=100)
     
     if results.empty:
         print("No results found.")
@@ -263,12 +233,12 @@ def main():
     print("\n" + "="*60)
     print("TOP 3 LONG CANDIDATES (BULLISH)")
     print("="*60)
-    print(long_candidates[['pair', 'score', 'price', 'rsi', 'price_change_24h', 'relative_volume']].to_string(index=False))
+    print(long_candidates[['pair', 'score', 'price', 'rsi', 'price_change_24h']].to_string(index=False))
     
     print("\n" + "="*60)
     print("TOP 3 SHORT CANDIDATES (BEARISH)")
     print("="*60)
-    print(short_candidates[['pair', 'score', 'price', 'rsi', 'price_change_24h', 'relative_volume']].to_string(index=False))
+    print(short_candidates[['pair', 'score', 'price', 'rsi', 'price_change_24h']].to_string(index=False))
     
     print("\n" + "="*60)
     print("ANALYSIS COMPLETE")
