@@ -1,58 +1,73 @@
-
+import torch
+import pandas as pd
+import numpy as np
+import joblib
 import os
-import requests
-from typing import Dict, Any
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from model_def import LSTMEntryModel
+from sklearn.preprocessing import StandardScaler
 
-def _decimals(price: float) -> int:
-    if price >= 1000: return 2
-    if price >= 100: return 3
-    if price >= 1: return 4
-    if price >= 0.1: return 5
-    return 6
+# 🔧 CONFIG
+COINS = ["AAVE-USD"]  # Add your list here
+DATA_DIR = "live_data"
+MODEL_DIR = "models_lstm"
+SCALER_DIR = "scalers"
+FEATURE_DIR = "features"
+SEQ_LEN = 60
+CONF_THRESH = 0.9
 
-class TelegramAlerter:
-    def __init__(self, cfg: Dict[str, Any]):
-        self.cfg = cfg
-        self.token = os.getenv(cfg["alerts"]["telegram"]["bot_token_env"], "")
-        self.chat_id = os.getenv(cfg["alerts"]["telegram"]["chat_id_env"], "")
-        self.tz = ZoneInfo(cfg.get("timezone","America/Los_Angeles"))
+def load_latest_data(coin):
+    path = os.path.join(DATA_DIR, f"{coin}.csv")
+    df = pd.read_csv(path)
+    df['time'] = pd.to_datetime(df['time'], utc=True)
+    return df
 
-    def _send(self, text: str):
-        if not self.token or not self.chat_id:
-            print("[ALERT] Missing TG credentials; printing instead:\n" + text)
-            return
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        r = requests.post(url, json={"chat_id": self.chat_id, "text": text}, timeout=15)
-        if r.status_code != 200:
-            print(f"[ALERT ERROR] {r.status_code} {r.text}")
+def prepare_features(df, scaler, feature_order):
+    df = df.copy()
+    X = df[feature_order].values
+    X_scaled = scaler.transform(X)
+    X_seq = [X_scaled[i:i+SEQ_LEN] for i in range(len(X_scaled) - SEQ_LEN)]
+    times = df['time'].iloc[SEQ_LEN:].values
+    return np.array(X_seq), times
 
-    def send_new_trade(self, trade_id, sym, side, entry, sl, tp, score, ctx, last_6h_close_utc):
-        d = _decimals(entry)
-        pt = last_6h_close_utc.astimezone(self.tz).strftime("%Y-%m-%d %I:%M %p %Z")
-        ema_below = ctx.get('ema_below'); ema_above = ctx.get('ema_above')
-        vol_pct = ctx.get('volume_pctile')
-        cluster = ctx.get('clusters', {})
-        lines = [
-            f"⚡ SUPERMODEL SIGNAL",
-            f"Pair: {sym.upper()}",
-            f"Side: {side.upper()}",
-            f"Entry: {entry:.{d}f}",
-            f"SL: {sl:.{d}f}  |  TP: {tp:.{d}f}",
-            f"Score: {score}",
-            f"1H EMA below/above: {'' if ema_below is None else f'{ema_below:.{d}f}'} / {'' if ema_above is None else f'{ema_above:.{d}f}'}",
-            f"1H Vol pctile: {vol_pct:.0f}",
-            f"6H Close (PT): {pt}",
-        ]
-        if cluster:
-            sup = cluster.get('support_nearby'); res = cluster.get('resistance_nearby')
-            sd = cluster.get('support_dist_pct'); rd = cluster.get('resistance_dist_pct')
-            lines.append(f"Clusters: support_near={sup} ({sd}%) | resistance_near={res} ({rd}%)")
-        self._send("\n".join(lines))
+def make_prediction(model, X_seq):
+    model.eval()
+    with torch.no_grad():
+        inputs = torch.tensor(X_seq[-1:], dtype=torch.float32)
+        entry_out, tp_out, sl_out = model(inputs)
+        probs = torch.softmax(entry_out, dim=1).cpu().numpy()[0]
+        pred_label = np.argmax(probs)
+        confidence = probs[pred_label]
+        return pred_label, confidence, tp_out.item(), sl_out.item()
 
-    def send_close(self, trade):
-        self._send(f"CLOSE {trade.symbol} outcome={trade.outcome} R={trade.r_multiple:.2f}")
+def label_to_text(label):
+    return {0: "HOLD", 1: "BUY", 2: "SELL"}.get(label, "UNKNOWN")
 
-    def send_test(self, text: str = "Supermodel is live (full send) 🚀"):
-        self._send(text)
+# 🔁 Run for each coin
+for coin in COINS:
+    print(f"\n🔎 Checking {coin}...")
+
+    df = load_latest_data(coin)
+
+    # Load model, scaler, features
+    coin_symbol = coin.replace("-", "_")
+    model_path = os.path.join(MODEL_DIR, f"{coin_symbol}_lstm_tp_sl.pth")
+    scaler_path = os.path.join(SCALER_DIR, f"{coin_symbol}_scaler.pkl")
+    features_path = os.path.join(FEATURE_DIR, f"{coin_symbol}_features.pkl")
+
+    model = LSTMEntryModel(input_dim=len(pd.read_pickle(features_path)))
+    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+    scaler = joblib.load(scaler_path)
+    feature_order = joblib.load(features_path)
+
+    X_seq, times = prepare_features(df, scaler, feature_order)
+
+    if len(X_seq) == 0:
+        print(f"⚠️ Not enough data for {coin}")
+        continue
+
+    pred_label, conf, tp, sl = make_prediction(model, X_seq)
+
+    if conf >= CONF_THRESH:
+        print(f"🚨 {coin} ALERT: {label_to_text(pred_label)} | Confidence: {conf:.2f} | TP: {tp:.3f} | SL: {sl:.3f}")
+    else:
+        print(f"❌ No confident signal for {coin} (Conf: {conf:.2f})")
